@@ -68,10 +68,7 @@ flowchart LR
 ├── cloud_function/
 │   ├── main.py                     # Core Cloud Function logic & transformation pipeline
 │   └── requirements.txt            # Python dependencies (Functions Framework, Pandas, OpenPyXL, etc.)
-├── email_to_bigquery_service/      # Optional: Containerized Outlook email-attachment ingestion service
 ├── gcs_excel_to_bigquery_guide.md  # Comprehensive deployment & architecture walkthrough
-├── dataplex_dq_spec.yaml           # Dataplex / Knowledge Catalog Data Quality rule definitions
-├── bq_dq_alerts_setup.sql          # SQL validation scripts & anomaly detection queries
 └── README.md                       # Repository documentation
 ```
 

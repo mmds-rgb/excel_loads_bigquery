@@ -78,7 +78,7 @@ flowchart LR
 
 | Variable | Default Value | Description |
 | :--- | :--- | :--- |
-| `BIGQUERY_DATASET` | `IntactLoadTesting` | Target BigQuery dataset ID |
+| `BIGQUERY_DATASET` | `LoadTesting` | Target BigQuery dataset ID |
 | `BIGQUERY_TABLE` | `brand_campaign_weekly_performance` | Target BigQuery table name |
 
 ---
@@ -97,7 +97,7 @@ flowchart LR
 #### 2. Create the BigQuery Dataset
 1. Navigate to **BigQuery** in the GCP Console.
 2. In the Explorer panel, click the three dots next to your Project ID > **Create dataset**.
-3. Set **Dataset ID**: `IntactLoadTesting`.
+3. Set **Dataset ID**: `LoadTesting`.
 4. Set **Data location**: Same region as your bucket (e.g., `northamerica-northeast1`).
 5. Click **CREATE DATASET**. *(The table will be auto-created upon the first file upload).*
 
@@ -115,8 +115,8 @@ flowchart LR
    - **Environment Variables**: Add `BIGQUERY_DATASET` and `BIGQUERY_TABLE` if custom values are needed.
 4. Click **CREATE** / **NEXT** to open the Code Editor:
    - **Entry point**: `gcs_excel_to_bigquery` (or `hello_gcs`)
-   - Copy contents of [cloud_function/requirements.txt](file:///home/mmds/intact_marketing/cloud_function/requirements.txt) into `requirements.txt`.
-   - Copy contents of [cloud_function/main.py](file:///home/mmds/intact_marketing/cloud_function/main.py) into `main.py`.
+   - Copy contents of [cloud_function/requirements.txt](file:///home/mmds/marketing/cloud_function/requirements.txt) into `requirements.txt`.
+   - Copy contents of [cloud_function/main.py](file:///home/mmds/marketing/cloud_function/main.py) into `main.py`.
 5. Click **DEPLOY**.
 
 ---
@@ -128,7 +128,7 @@ flowchart LR
 export PROJECT_ID="your-gcp-project-id"
 export REGION="northamerica-northeast1"
 export BUCKET_NAME="brand-campaign-landing"
-export DATASET_NAME="IntactLoadTesting"
+export DATASET_NAME="LoadTesting"
 export TABLE_NAME="brand_campaign_weekly_performance"
 
 # 1. Create Cloud Storage Bucket
@@ -192,7 +192,7 @@ gcloud functions deploy excel-to-bigquery-loader \
      _source_file,
      _ingested_at,
      COUNT(*) AS records_loaded
-   FROM `IntactLoadTesting.brand_campaign_weekly_performance`
+   FROM `LoadTesting.brand_campaign_weekly_performance`
    GROUP BY _source_file, _ingested_at
    ORDER BY _ingested_at DESC;
    ```
@@ -207,7 +207,7 @@ gcloud functions deploy excel-to-bigquery-loader \
 
 ## 📊 Data Quality & Governance (Optional)
 
-For automated quality monitoring, this repository includes Dataplex / Knowledge Catalog Data Quality configurations ([dataplex_dq_spec.yaml](file:///home/mmds/intact_marketing/dataplex_dq_spec.yaml)):
+For automated quality monitoring, this repository includes Dataplex / Knowledge Catalog Data Quality configurations ([dataplex_dq_spec.yaml](file:///home/mmds/marketing/dataplex_dq_spec.yaml)):
 * **Dynamic Missing Date Detection**: Ensures continuous daily/weekly reporting without missing intervals.
 * **Volume Anomaly Detection**: Validates ingested row counts against 3 standard deviations of rolling historical averages.
 * **Completeness & Null Checks**: Ensures vital campaign dimensions and metrics are populated.

@@ -1,116 +1,133 @@
+import io
 import os
+import re
 import logging
-from flask import Flask, request, jsonify
-from config import Config
-from services.outlook_service import OutlookService
-from services.gcs_service import GCSService
-from services.bigquery_service import BigQueryService
+from datetime import datetime, timezone
+import functions_framework
+from google.api_core.exceptions import NotFound
+import pandas as pd
+from google.cloud import storage, bigquery
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("email_to_bigquery")
+# Configure logging for Cloud Run logs
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gcs_excel_to_bigquery")
 
-app = Flask(__name__)
+BIGQUERY_DATASET = os.getenv("BIGQUERY_DATASET", "IntactLoadTesting")
+BIGQUERY_TABLE = os.getenv("BIGQUERY_TABLE", "brand_campaign_weekly_performance")
 
-gcs_service = GCSService()
-bq_service = BigQueryService()
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Health check endpoint for Cloud Run container probes."""
-    return jsonify({"status": "healthy", "service": "email-to-bigquery-ingestion"}), 200
+def clean_string_val(val):
+    """Formats values as clean strings without trailing .0 on integer floats."""
+    if pd.isna(val):
+        return None
+    if isinstance(val, float) and val.is_integer():
+        return str(int(val))
+    return str(val).strip()
 
-@app.route("/trigger-sync", methods=["POST"])
-def trigger_sync():
+
+@functions_framework.cloud_event
+def hello_gcs(cloud_event):
     """
-    Scheduled endpoint invoked by Cloud Scheduler.
-    2. Uploads raw files to GCS landing bucket.
-    3. Parses Excel content and appends records to BigQuery.
-    4. Moves raw files to GCS archive bucket.
+    Triggered on GCS file upload. Parses Excel and appends to BigQuery.
+    Named hello_gcs to match Cloud Run's default entry point.
     """
-    logger.info("Starting scheduled Outlook email ingestion pipeline...")
-    
-    try:
-        outlook_service = OutlookService()
-        files = outlook_service.fetch_weekly_attachments()
+    event_data = cloud_event.data
+    bucket_name = event_data["bucket"]
+    file_name = event_data["name"]
 
-        if not files:
-            logger.info("No new campaign emails or attachments found.")
-            return jsonify({"status": "completed", "message": "No new attachments to process", "files_processed": 0}), 200
+    logger.info(f"⚡ New file event: gs://{bucket_name}/{file_name}")
 
-        total_rows_inserted = 0
-        processed_files = []
+    # Skip archived files or non-Excel extensions
+    is_archive = file_name.startswith("archived/")
+    is_excel = file_name.lower().endswith((".xlsx", ".xls"))
+    if is_archive or not is_excel:
+        logger.info(f"⏩ Skipping non-target file: {file_name}")
+        return
 
-        for item in files:
-            filename = item["filename"]
-            content = item["content"]
+    storage_client = storage.Client()
+    bigquery_client = bigquery.Client()
 
-            # 1. Save raw file to GCS landing bucket
-            gcs_uri = gcs_service.upload_bytes(Config.GCS_LANDING_BUCKET, filename, content)
+    # 1. Download file bytes (gracefully handle already-processed/deleted files)
+    source_bucket = storage_client.bucket(bucket_name)
+    blob = source_bucket.blob(file_name)
 
-            # 2. Parse Excel & append to BigQuery
-            rows_added = bq_service.process_and_load_excel(content, filename)
-            total_rows_inserted += rows_added
-
-            # 3. Archive processed file in GCS
-            gcs_service.archive_blob(Config.GCS_LANDING_BUCKET, filename, Config.GCS_ARCHIVE_BUCKET)
-
-            processed_files.append({"filename": filename, "gcs_uri": gcs_uri, "rows_loaded": rows_added})
-
-        return jsonify({
-            "status": "success",
-            "files_processed": len(processed_files),
-            "total_rows_loaded": total_rows_inserted,
-            "details": processed_files
-        }), 200
-
-    except Exception as e:
-        logger.error(f"Error during ingestion pipeline execution: {str(e)}", exc_info=True)
-        return jsonify({"status": "error", "error_message": str(e)}), 500
-
-
-@app.route("/process-gcs-event", methods=["POST"])
-def process_gcs_event():
-    """
-    Eventarc / GCS Event Notification endpoint.
-    Triggered when an Excel file is uploaded to the landing bucket (e.g., via Power Automate).
-    """
-    event = request.get_json()
-    if not event:
-        return jsonify({"error": "Invalid request, no event JSON payload received"}), 400
-
-    bucket_name = event.get("bucket")
-    file_name = event.get("name")
-
-    if not file_name or not file_name.lower().endswith((".xlsx", ".xls")):
-        logger.info(f"Ignoring non-Excel file event: {file_name}")
-        return jsonify({"status": "skipped", "reason": "Not an Excel file"}), 200
-
-    logger.info(f"Processing GCS Event Notification for blob: gs://{bucket_name}/{file_name}")
+    if not blob.exists():
+        logger.info(f"⏩ File gs://{bucket_name}/{file_name} no longer exists. Skipping.")
+        return
 
     try:
-        # Download blob content from GCS
-        bucket = gcs_service.client.bucket(bucket_name)
-        blob = bucket.blob(file_name)
-        content_bytes = blob.download_as_bytes()
+        file_bytes = blob.download_as_bytes()
+    except NotFound:
+        logger.info(f"⏩ File gs://{bucket_name}/{file_name} was not found. Skipping.")
+        return
 
-        # Parse Excel & append to BigQuery
-        rows_added = bq_service.process_and_load_excel(content_bytes, file_name)
+    # 2. Parse Excel spreadsheet
+    df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
+    if df.empty:
+        logger.warning(f"⚠️ {file_name} is empty. Skipping BigQuery load.")
+        return
 
-        # Archive processed file
-        gcs_service.archive_blob(bucket_name, file_name, Config.GCS_ARCHIVE_BUCKET)
+    # 3. Clean columns for BigQuery (letters, numbers, underscores only; strip parentheses/symbols)
+    clean_columns = []
+    for col in df.columns:
+        c = str(col).strip().lower()
+        c = re.sub(r"[^a-z0-9_]+", "_", c).strip("_")
+        if c and c[0].isdigit():
+            c = f"_{c}"
+        if not c:
+            c = f"column_{len(clean_columns)}"
+        clean_columns.append(c)
+    df.columns = clean_columns
 
-        return jsonify({
-            "status": "success",
-            "filename": file_name,
-            "rows_loaded": rows_added
-        }), 200
+    df["_ingested_at"] = datetime.now(timezone.utc)
+    df["_source_file"] = file_name
 
-    except Exception as e:
-        logger.error(f"Failed to process GCS event for {file_name}: {str(e)}", exc_info=True)
-        return jsonify({"status": "error", "error": str(e)}), 500
+    # 4. Standardize date formats
+    for col in df.columns:
+        if "date" in col or "period" in col:
+            df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    # 5. Schema Alignment: Match DataFrame types to existing BigQuery table schema
+    table_id = f"{bigquery_client.project}.{BIGQUERY_DATASET}.{BIGQUERY_TABLE}"
+    try:
+        existing_table = bigquery_client.get_table(table_id)
+        schema_map = {field.name: field.field_type for field in existing_table.schema}
+        logger.info(f"📋 Found existing BigQuery table schema with {len(schema_map)} columns. Aligning types...")
+
+        for col in df.columns:
+            if col in schema_map:
+                expected_type = schema_map[col]
+                if expected_type in ("STRING", "BYTES"):
+                    df[col] = df[col].apply(clean_string_val)
+                elif expected_type in ("FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                elif expected_type in ("INTEGER", "INT64"):
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
+                elif expected_type in ("DATE", "DATETIME", "TIMESTAMP"):
+                    df[col] = pd.to_datetime(df[col], errors="coerce")
+    except NotFound:
+        logger.info(f"🆕 Table {table_id} does not exist yet. It will be auto-created.")
+
+    # 6. Append to BigQuery with automatic schema update/evolution
+    job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        schema_update_options=[bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION],
+        autodetect=True
+    )
+
+    logger.info(f"📤 Loading {len(df)} rows to BigQuery: {table_id}")
+    load_job = bigquery_client.load_table_from_dataframe(df, table_id, job_config=job_config)
+    load_job.result()
+    logger.info(f"✅ Successfully inserted {len(df)} rows into {table_id}!")
+
+    # 7. Archive original file to /archived/ with timestamp prefix
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    base_name = os.path.basename(file_name)
+    archive_name = f"archived/{timestamp}_{base_name}"
+    source_bucket.copy_blob(blob, source_bucket, archive_name)
+    blob.delete()
+    logger.info(f"🗄️ Moved file to gs://{bucket_name}/{archive_name}")
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+# Alias so both 'hello_gcs' and 'gcs_excel_to_bigquery' work seamlessly
+gcs_excel_to_bigquery = hello_gcs

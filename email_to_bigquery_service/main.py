@@ -24,7 +24,6 @@ def health_check():
 def trigger_sync():
     """
     Scheduled endpoint invoked by Cloud Scheduler.
-    1. Fetches unread Excel attachments from Outlook via MS Graph API.
     2. Uploads raw files to GCS landing bucket.
     3. Parses Excel content and appends records to BigQuery.
     4. Moves raw files to GCS archive bucket.

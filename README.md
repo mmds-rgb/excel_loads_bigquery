@@ -68,7 +68,6 @@ flowchart LR
 ├── cloud_function/
 │   ├── main.py                     # Core Cloud Function logic & transformation pipeline
 │   └── requirements.txt            # Python dependencies (Functions Framework, Pandas, OpenPyXL, etc.)
-├── gcs_excel_to_bigquery_guide.md  # Comprehensive deployment & architecture walkthrough
 └── README.md                       # Repository documentation
 ```
 
